@@ -1,0 +1,6 @@
+.git
+.github
+coverage.*
+*.out
+*.test
+netbox-to-external-dns-controller
