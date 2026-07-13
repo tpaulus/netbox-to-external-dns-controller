@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	env "github.com/caarlos0/env/v11"
 )
 
 const (
@@ -34,36 +34,50 @@ type Config struct {
 	DeleteOnPartial    bool
 }
 
+type rawConfig struct {
+	NetBoxURL          string        `env:"NETBOX_URL,required,notEmpty"`
+	NetBoxToken        string        `env:"NETBOX_TOKEN,required,notEmpty"`
+	NetBoxFilters      string        `env:"NETBOX_FILTERS"`
+	NetBoxPageSize     int           `env:"NETBOX_PAGE_SIZE" envDefault:"100"`
+	Namespace          string        `env:"TARGET_NAMESPACE" envDefault:"external-records"`
+	ExternalDNSOwnerID string        `env:"EXTERNAL_DNS_OWNER_ID" envDefault:"netbox-dns-sync"`
+	DomainAllowlist    string        `env:"DOMAIN_ALLOWLIST,required,notEmpty"`
+	EnabledStatuses    string        `env:"NETBOX_ENABLED_STATUSES" envDefault:"active"`
+	TTLField           string        `env:"NETBOX_TTL_FIELD" envDefault:"external_dns_ttl"`
+	MetricsAddress     string        `env:"METRICS_ADDRESS"`
+	KubeconfigPath     string        `env:"KUBECONFIG"`
+	HTTPTimeout        time.Duration `env:"HTTP_TIMEOUT" envDefault:"30s"`
+	RetryCount         int           `env:"RETRY_COUNT" envDefault:"3"`
+	DeleteOnPartial    bool          `env:"DELETE_ON_PARTIAL_FAILURE"`
+	DryRun             bool          `env:"DRY_RUN"`
+	MaxChanges         int           `env:"MAX_CHANGES_PER_RUN"`
+	SyncInterval       time.Duration `env:"SYNC_INTERVAL"`
+}
+
 func loadConfig() (Config, error) {
-	cfg := Config{
-		NetBoxURL:          strings.TrimRight(os.Getenv("NETBOX_URL"), "/"),
-		NetBoxToken:        os.Getenv("NETBOX_TOKEN"),
-		NetBoxFilters:      strings.TrimPrefix(strings.TrimSpace(os.Getenv("NETBOX_FILTERS")), "?"),
-		NetBoxPageSize:     envInt("NETBOX_PAGE_SIZE", 100),
-		Namespace:          envString("TARGET_NAMESPACE", "external-records"),
-		ExternalDNSOwnerID: envString("EXTERNAL_DNS_OWNER_ID", "netbox-dns-sync"),
-		Allowlist:          normalizeList(os.Getenv("DOMAIN_ALLOWLIST")),
-		DryRun:             envBool("DRY_RUN", false),
-		MaxChanges:         envInt("MAX_CHANGES_PER_RUN", 0),
-		EnabledStatuses: listToSet(defaultList(
-			normalizeList(os.Getenv("NETBOX_ENABLED_STATUSES")),
-			[]string{"active"},
-		)),
-		TTLField:       envString("NETBOX_TTL_FIELD", "external_dns_ttl"),
-		MetricsAddress: strings.TrimSpace(os.Getenv("METRICS_ADDRESS")),
-		KubeconfigPath: strings.TrimSpace(os.Getenv("KUBECONFIG")),
-		HTTPTimeout:    envDuration("HTTP_TIMEOUT", 30*time.Second),
-		RetryCount:     envInt("RETRY_COUNT", 3),
+	var raw rawConfig
+	if err := env.Parse(&raw); err != nil {
+		return Config{}, fmt.Errorf("parse environment: %w", err)
 	}
 
-	cfg.DeleteOnPartial = envBool("DELETE_ON_PARTIAL_FAILURE", false)
-
-	if raw := strings.TrimSpace(os.Getenv("SYNC_INTERVAL")); raw != "" {
-		interval, err := time.ParseDuration(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("parse SYNC_INTERVAL: %w", err)
-		}
-		cfg.SyncInterval = interval
+	cfg := Config{
+		NetBoxURL:          strings.TrimRight(strings.TrimSpace(raw.NetBoxURL), "/"),
+		NetBoxToken:        strings.TrimSpace(raw.NetBoxToken),
+		NetBoxFilters:      strings.TrimPrefix(strings.TrimSpace(raw.NetBoxFilters), "?"),
+		NetBoxPageSize:     raw.NetBoxPageSize,
+		Namespace:          strings.TrimSpace(raw.Namespace),
+		ExternalDNSOwnerID: strings.TrimSpace(raw.ExternalDNSOwnerID),
+		Allowlist:          normalizeList(raw.DomainAllowlist),
+		SyncInterval:       raw.SyncInterval,
+		DryRun:             raw.DryRun,
+		MaxChanges:         raw.MaxChanges,
+		EnabledStatuses:    listToSet(normalizeList(raw.EnabledStatuses)),
+		TTLField:           strings.TrimSpace(raw.TTLField),
+		MetricsAddress:     strings.TrimSpace(raw.MetricsAddress),
+		KubeconfigPath:     strings.TrimSpace(raw.KubeconfigPath),
+		HTTPTimeout:        raw.HTTPTimeout,
+		RetryCount:         raw.RetryCount,
+		DeleteOnPartial:    raw.DeleteOnPartial,
 	}
 
 	if cfg.NetBoxURL == "" {
@@ -74,6 +88,9 @@ func loadConfig() (Config, error) {
 	}
 	if len(cfg.Allowlist) == 0 {
 		return Config{}, errors.New("DOMAIN_ALLOWLIST must contain at least one suffix")
+	}
+	if len(cfg.EnabledStatuses) == 0 {
+		return Config{}, errors.New("NETBOX_ENABLED_STATUSES must contain at least one status")
 	}
 	if cfg.ExternalDNSOwnerID == "" {
 		return Config{}, errors.New("EXTERNAL_DNS_OWNER_ID must not be empty")
@@ -91,49 +108,6 @@ func loadConfig() (Config, error) {
 	return cfg, nil
 }
 
-func envString(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envBool(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
 func normalizeList(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -148,13 +122,6 @@ func normalizeList(raw string) []string {
 			continue
 		}
 		values = append(values, trimmed)
-	}
-	return values
-}
-
-func defaultList(values, fallback []string) []string {
-	if len(values) == 0 {
-		return fallback
 	}
 	return values
 }

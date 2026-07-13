@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,10 +27,10 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-var dnsRecordGVR = schema.GroupVersionResource{
+var dnsEndpointGVR = schema.GroupVersionResource{
 	Group:    "externaldns.k8s.io",
 	Version:  "v1alpha1",
-	Resource: "dnsrecords",
+	Resource: "dnsendpoints",
 }
 
 type reconciler struct {
@@ -45,7 +46,7 @@ type desiredResource struct {
 	Namespace   string
 	Labels      map[string]string
 	Annotations map[string]string
-	Endpoint    endpointSpec
+	Endpoints   []endpointSpec
 }
 
 type endpointSpec struct {
@@ -76,6 +77,24 @@ type reconcileSummary struct {
 	Unchanged     int
 	SkippedDelete int
 	RecordErrors  int
+}
+
+type deviceAccumulator struct {
+	DeviceID   int
+	DeviceName string
+	Groups     map[string]struct{}
+	IDs        map[int]struct{}
+	Endpoints  map[string]*endpointAccumulator
+}
+
+type endpointAccumulator struct {
+	DNSName    string
+	RecordType string
+	TTL        *int64
+	Targets    map[string]struct{}
+	IDs        map[int]struct{}
+	Tags       map[string]struct{}
+	Group      string
 }
 
 func buildKubeConfig(path string) (*rest.Config, error) {
@@ -165,70 +184,88 @@ func (r *reconciler) emitEvent(eventType, reason, message string) {
 }
 
 func buildDesiredResources(namespace, ownerID string, records []sourceRecord) []desiredResource {
-	grouped := make(map[string]*endpointAccumulator)
+	grouped := make(map[string]*deviceAccumulator)
 	for _, record := range records {
-		key := endpointKey(record)
-		acc, ok := grouped[key]
+		deviceKey := deviceKey(record)
+		device, ok := grouped[deviceKey]
 		if !ok {
-			acc = &endpointAccumulator{
+			device = &deviceAccumulator{
+				DeviceID:   record.DeviceID,
+				DeviceName: record.DeviceName,
+				Groups:     map[string]struct{}{},
+				IDs:        map[int]struct{}{},
+				Endpoints:  map[string]*endpointAccumulator{},
+			}
+			grouped[deviceKey] = device
+		}
+		device.Groups[record.Group] = struct{}{}
+		device.IDs[record.ObjectID] = struct{}{}
+
+		endpointKey := endpointKey(record)
+		endpoint, ok := device.Endpoints[endpointKey]
+		if !ok {
+			endpoint = &endpointAccumulator{
 				DNSName:    record.DNSName,
 				RecordType: record.Type,
 				TTL:        record.TTL,
-				Group:      record.Group,
 				Targets:    map[string]struct{}{},
 				IDs:        map[int]struct{}{},
 				Tags:       map[string]struct{}{},
+				Group:      record.Group,
 			}
-			grouped[key] = acc
+			device.Endpoints[endpointKey] = endpoint
 		}
-		acc.Targets[record.Target] = struct{}{}
-		acc.IDs[record.ObjectID] = struct{}{}
+		endpoint.Targets[record.Target] = struct{}{}
+		endpoint.IDs[record.ObjectID] = struct{}{}
 		for _, tag := range record.Tags {
-			acc.Tags[tag] = struct{}{}
+			endpoint.Tags[tag] = struct{}{}
 		}
 	}
 
 	resourceKeys := sortedKeys(grouped)
 	resources := make([]desiredResource, 0, len(resourceKeys))
 	for _, key := range resourceKeys {
-		acc := grouped[key]
+		device := grouped[key]
+		endpointKeys := sortedKeys(device.Endpoints)
+		endpoints := make([]endpointSpec, 0, len(endpointKeys))
+		for _, endpointKey := range endpointKeys {
+			endpoint := device.Endpoints[endpointKey]
+			endpoints = append(endpoints, endpointSpec{
+				DNSName:    endpoint.DNSName,
+				Labels:     map[string]string{"owner": ownerID},
+				RecordTTL:  endpoint.TTL,
+				RecordType: endpoint.RecordType,
+				Targets:    sortedSet(endpoint.Targets),
+				ProviderSpecific: []providerSpecific{
+					{Name: "netbox-group", Value: endpoint.Group},
+					{Name: "netbox-object-ids", Value: intsToCSV(endpoint.IDs)},
+					{Name: "netbox-tags", Value: strings.Join(sortedSet(endpoint.Tags), ",")},
+				},
+			})
+		}
 		resources = append(resources, desiredResource{
-			Name:      resourceNameForRecord(acc.DNSName, acc.RecordType),
+			Name:      resourceNameForDevice(device.DeviceName, device.DeviceID),
 			Namespace: namespace,
 			Labels: map[string]string{
 				managedByLabel:             managedByValue,
 				"externaldns.k8s.io/owner": ownerID,
-				"netbox-dns-sync/group":    sanitizeName(acc.Group),
+				"netbox-dns-sync/device":   sanitizeName(device.DeviceName),
 			},
 			Annotations: map[string]string{
-				"netbox.object.ids":   intsToCSV(acc.IDs),
-				"netbox.domain.group": acc.Group,
+				"netbox.device.id":     strconv.Itoa(device.DeviceID),
+				"netbox.device.name":   device.DeviceName,
+				"netbox.domain.groups": strings.Join(sortedSet(device.Groups), ","),
+				"netbox.object.ids":    intsToCSV(device.IDs),
 			},
-			Endpoint: endpointSpec{
-				DNSName:    acc.DNSName,
-				Labels:     map[string]string{"owner": ownerID},
-				RecordTTL:  acc.TTL,
-				RecordType: acc.RecordType,
-				Targets:    sortedSet(acc.Targets),
-				ProviderSpecific: []providerSpecific{
-					{Name: "netbox-object-ids", Value: intsToCSV(acc.IDs)},
-					{Name: "netbox-tags", Value: strings.Join(sortedSet(acc.Tags), ",")},
-				},
-			},
+			Endpoints: endpoints,
 		})
 	}
 
 	return resources
 }
 
-type endpointAccumulator struct {
-	DNSName    string
-	RecordType string
-	TTL        *int64
-	Group      string
-	Targets    map[string]struct{}
-	IDs        map[int]struct{}
-	Tags       map[string]struct{}
+func deviceKey(record sourceRecord) string {
+	return fmt.Sprintf("%d|%s", record.DeviceID, strings.ToLower(strings.TrimSpace(record.DeviceName)))
 }
 
 func endpointKey(record sourceRecord) string {
@@ -239,18 +276,17 @@ func endpointKey(record sourceRecord) string {
 	return strings.Join([]string{record.DNSName, record.Type, ttl}, "|")
 }
 
-func resourceNameForRecord(dnsName, recordType string) string {
-	normalizedName := strings.TrimSuffix(strings.ToLower(dnsName), ".")
-	normalizedType := strings.ToUpper(recordType)
-	hash := sha256.Sum256([]byte(strings.Join([]string{normalizedName, normalizedType, ""}, "/")))
-	suffix := fmt.Sprintf("-%x", hash[:4])
+func resourceNameForDevice(deviceName string, deviceID int) string {
+	normalizedName := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(deviceName)), ".")
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s/%d", normalizedName, deviceID)))
+	suffix := fmt.Sprintf("-%d-%x", deviceID, hash[:2])
 
 	base := sanitizeName(normalizedName)
 	if maxBase := 253 - len(suffix); len(base) > maxBase {
 		base = strings.Trim(base[:maxBase], "-")
 	}
 	if base == "" {
-		base = "record"
+		base = "device"
 	}
 	return base + suffix
 }
@@ -270,7 +306,7 @@ func sanitizeName(value string) string {
 }
 
 func (r *reconciler) listManaged(ctx context.Context) (map[string]*unstructured.Unstructured, error) {
-	list, err := r.dynamicClient.Resource(dnsRecordGVR).Namespace(r.config.Namespace).List(ctx, metav1.ListOptions{
+	list, err := r.dynamicClient.Resource(dnsEndpointGVR).Namespace(r.config.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: managedByLabel + "=" + managedByValue + ",externaldns.k8s.io/owner=" + r.config.ExternalDNSOwnerID,
 	})
 	if err != nil {
@@ -341,31 +377,30 @@ func equivalentResource(desired desiredResource, existing *unstructured.Unstruct
 		Annotations: subsetMap(existing.GetAnnotations(), desired.Annotations),
 	}
 
-	endpoint, found, err := unstructured.NestedMap(existing.Object, "spec", "endpoint")
+	endpoints, found, err := unstructured.NestedSlice(existing.Object, "spec", "endpoints")
 	if err != nil || !found {
 		return false
 	}
-	current.Endpoint = normalizeExistingEndpoint(endpoint)
+	current.Endpoints = normalizeExistingEndpoints(endpoints)
 	return reflectJSON(normalizeDesiredResource(current)) == reflectJSON(normalizeDesiredResource(desired))
 }
 
-func normalizeExistingEndpoint(value map[string]any) endpointSpec {
+func normalizeExistingEndpoints(value []any) []endpointSpec {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return endpointSpec{}
+		return nil
 	}
-	var endpoint endpointSpec
-	if err := json.Unmarshal(data, &endpoint); err != nil {
-		return endpointSpec{}
+	var endpoints []endpointSpec
+	if err := json.Unmarshal(data, &endpoints); err != nil {
+		return nil
 	}
-	sort.Strings(endpoint.Targets)
-	sort.Slice(endpoint.ProviderSpecific, func(i, j int) bool {
-		if endpoint.ProviderSpecific[i].Name == endpoint.ProviderSpecific[j].Name {
-			return endpoint.ProviderSpecific[i].Value < endpoint.ProviderSpecific[j].Value
-		}
-		return endpoint.ProviderSpecific[i].Name < endpoint.ProviderSpecific[j].Name
+	for i := range endpoints {
+		endpoints[i] = normalizeEndpoint(endpoints[i])
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		return endpointSortKey(endpoints[i]) < endpointSortKey(endpoints[j])
 	})
-	return endpoint
+	return endpoints
 }
 
 func reflectJSON(value any) string {
@@ -375,16 +410,36 @@ func reflectJSON(value any) string {
 
 func normalizeDesiredResource(resource desiredResource) desiredResource {
 	normalized := resource
-	normalized.Endpoint.Targets = append([]string(nil), resource.Endpoint.Targets...)
-	normalized.Endpoint.ProviderSpecific = append([]providerSpecific(nil), resource.Endpoint.ProviderSpecific...)
-	sort.Strings(normalized.Endpoint.Targets)
-	sort.Slice(normalized.Endpoint.ProviderSpecific, func(i, j int) bool {
-		if normalized.Endpoint.ProviderSpecific[i].Name == normalized.Endpoint.ProviderSpecific[j].Name {
-			return normalized.Endpoint.ProviderSpecific[i].Value < normalized.Endpoint.ProviderSpecific[j].Value
-		}
-		return normalized.Endpoint.ProviderSpecific[i].Name < normalized.Endpoint.ProviderSpecific[j].Name
+	normalized.Endpoints = append([]endpointSpec(nil), resource.Endpoints...)
+	for i := range normalized.Endpoints {
+		normalized.Endpoints[i] = normalizeEndpoint(normalized.Endpoints[i])
+	}
+	sort.Slice(normalized.Endpoints, func(i, j int) bool {
+		return endpointSortKey(normalized.Endpoints[i]) < endpointSortKey(normalized.Endpoints[j])
 	})
 	return normalized
+}
+
+func normalizeEndpoint(endpoint endpointSpec) endpointSpec {
+	normalized := endpoint
+	normalized.Targets = append([]string(nil), endpoint.Targets...)
+	normalized.ProviderSpecific = append([]providerSpecific(nil), endpoint.ProviderSpecific...)
+	sort.Strings(normalized.Targets)
+	sort.Slice(normalized.ProviderSpecific, func(i, j int) bool {
+		if normalized.ProviderSpecific[i].Name == normalized.ProviderSpecific[j].Name {
+			return normalized.ProviderSpecific[i].Value < normalized.ProviderSpecific[j].Value
+		}
+		return normalized.ProviderSpecific[i].Name < normalized.ProviderSpecific[j].Name
+	})
+	return normalized
+}
+
+func endpointSortKey(endpoint endpointSpec) string {
+	ttl := ""
+	if endpoint.RecordTTL != nil {
+		ttl = strconv.FormatInt(*endpoint.RecordTTL, 10)
+	}
+	return strings.Join([]string{endpoint.DNSName, endpoint.RecordType, ttl, strings.Join(endpoint.Targets, ",")}, "|")
 }
 
 func subsetMap(actual, expected map[string]string) map[string]string {
@@ -400,19 +455,19 @@ func (r *reconciler) applyChange(ctx context.Context, change changePlan) error {
 	case "create":
 		resource := toUnstructured(change.Resource)
 		return retry(ctx, r.config.RetryCount, func() error {
-			_, err := r.dynamicClient.Resource(dnsRecordGVR).Namespace(change.Resource.Namespace).Create(ctx, resource, metav1.CreateOptions{})
+			_, err := r.dynamicClient.Resource(dnsEndpointGVR).Namespace(change.Resource.Namespace).Create(ctx, resource, metav1.CreateOptions{})
 			return err
 		})
 	case "update":
 		resource := toUnstructured(change.Resource)
 		resource.SetResourceVersion(change.Existing.GetResourceVersion())
 		return retry(ctx, r.config.RetryCount, func() error {
-			_, err := r.dynamicClient.Resource(dnsRecordGVR).Namespace(change.Resource.Namespace).Update(ctx, resource, metav1.UpdateOptions{})
+			_, err := r.dynamicClient.Resource(dnsEndpointGVR).Namespace(change.Resource.Namespace).Update(ctx, resource, metav1.UpdateOptions{})
 			return err
 		})
 	case "delete":
 		return retry(ctx, r.config.RetryCount, func() error {
-			err := r.dynamicClient.Resource(dnsRecordGVR).Namespace(change.Resource.Namespace).Delete(ctx, change.Resource.Name, metav1.DeleteOptions{})
+			err := r.dynamicClient.Resource(dnsEndpointGVR).Namespace(change.Resource.Namespace).Delete(ctx, change.Resource.Name, metav1.DeleteOptions{})
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
@@ -424,41 +479,45 @@ func (r *reconciler) applyChange(ctx context.Context, change changePlan) error {
 }
 
 func toUnstructured(resource desiredResource) *unstructured.Unstructured {
-	targets := make([]any, 0, len(resource.Endpoint.Targets))
-	for _, target := range resource.Endpoint.Targets {
-		targets = append(targets, target)
-	}
-	endpoint := map[string]any{
-		"dnsName":    resource.Endpoint.DNSName,
-		"recordType": resource.Endpoint.RecordType,
-		"targets":    targets,
-	}
-	if len(resource.Endpoint.Labels) > 0 {
-		endpoint["labels"] = resource.Endpoint.Labels
-	}
-	if resource.Endpoint.RecordTTL != nil {
-		endpoint["recordTTL"] = *resource.Endpoint.RecordTTL
-	}
-	if resource.Endpoint.SetIdentifier != "" {
-		endpoint["setIdentifier"] = resource.Endpoint.SetIdentifier
-	}
-	if len(resource.Endpoint.ProviderSpecific) > 0 {
-		providerSpecific := make([]any, 0, len(resource.Endpoint.ProviderSpecific))
-		for _, value := range resource.Endpoint.ProviderSpecific {
-			if value.Value == "" {
-				continue
+	endpoints := make([]any, 0, len(resource.Endpoints))
+	for _, spec := range resource.Endpoints {
+		targets := make([]any, 0, len(spec.Targets))
+		for _, target := range spec.Targets {
+			targets = append(targets, target)
+		}
+		endpoint := map[string]any{
+			"dnsName":    spec.DNSName,
+			"recordType": spec.RecordType,
+			"targets":    targets,
+		}
+		if len(spec.Labels) > 0 {
+			endpoint["labels"] = spec.Labels
+		}
+		if spec.RecordTTL != nil {
+			endpoint["recordTTL"] = *spec.RecordTTL
+		}
+		if spec.SetIdentifier != "" {
+			endpoint["setIdentifier"] = spec.SetIdentifier
+		}
+		if len(spec.ProviderSpecific) > 0 {
+			providerSpecific := make([]any, 0, len(spec.ProviderSpecific))
+			for _, value := range spec.ProviderSpecific {
+				if value.Value == "" {
+					continue
+				}
+				providerSpecific = append(providerSpecific, map[string]any{"name": value.Name, "value": value.Value})
 			}
-			providerSpecific = append(providerSpecific, map[string]any{"name": value.Name, "value": value.Value})
+			if len(providerSpecific) > 0 {
+				endpoint["providerSpecific"] = providerSpecific
+			}
 		}
-		if len(providerSpecific) > 0 {
-			endpoint["providerSpecific"] = providerSpecific
-		}
+		endpoints = append(endpoints, endpoint)
 	}
 	object := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "externaldns.k8s.io/v1alpha1",
-		"kind":       "DNSRecord",
+		"kind":       "DNSEndpoint",
 		"spec": map[string]any{
-			"endpoint": endpoint,
+			"endpoints": endpoints,
 		},
 	}}
 	object.SetName(resource.Name)

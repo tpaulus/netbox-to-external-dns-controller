@@ -5,8 +5,17 @@ run:
 
 linters:
   enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
     - errcheck
+    - errorlint
+    - gocritic
+    - gosec
     - govet
     - ineffassign
+    - misspell
+    - nilerr
     - staticcheck
+    - unconvert
     - unused
