@@ -16,24 +16,34 @@ func TestBuildDesiredResourcesDeterministic(t *testing.T) {
 		{ObjectID: 4, DNSName: "x.lab.example.org", Target: "192.0.2.20", Type: "A", Group: "example.org"},
 	})
 
-	if len(resources) != 2 {
-		t.Fatalf("expected 2 resources, got %d", len(resources))
+	if len(resources) != 3 {
+		t.Fatalf("expected 3 resources, got %d", len(resources))
 	}
-	if resources[0].Name != "netbox-example-com" {
+	if resources[0].Name != resourceNameForRecord("a.example.com", "A") {
 		t.Fatalf("unexpected first resource name: %s", resources[0].Name)
 	}
-	if got := resources[0].Annotations["netbox.object.ids"]; got != "1,2,3" {
+	if got := resources[0].Annotations["netbox.object.ids"]; got != "1,3" {
 		t.Fatalf("unexpected provenance annotation: %s", got)
 	}
-	if len(resources[0].Endpoints) != 2 {
-		t.Fatalf("expected 2 endpoints in first resource, got %d", len(resources[0].Endpoints))
+	if got := resources[0].Annotations["netbox.domain.group"]; got != "example.com" {
+		t.Fatalf("unexpected domain group annotation: %s", got)
 	}
-	endpoint := resources[0].Endpoints[0]
+	endpoint := resources[0].Endpoint
 	if endpoint.DNSName != "a.example.com" || endpoint.RecordType != "A" {
-		t.Fatalf("unexpected first endpoint ordering: %+v", endpoint)
+		t.Fatalf("unexpected first endpoint: %+v", endpoint)
 	}
 	if len(endpoint.Targets) != 2 || endpoint.Targets[0] != "192.0.2.10" || endpoint.Targets[1] != "192.0.2.11" {
 		t.Fatalf("targets were not deterministically merged: %+v", endpoint.Targets)
+	}
+}
+
+func TestResourceNameForRecordNormalizesIdentity(t *testing.T) {
+	name := resourceNameForRecord("API.Example.com.", "a")
+	if name != resourceNameForRecord("api.example.com", "A") {
+		t.Fatalf("expected canonical name to ignore case and trailing dot, got %s", name)
+	}
+	if name == resourceNameForRecord("api.example.com", "AAAA") {
+		t.Fatalf("expected record type to affect resource naming")
 	}
 }
 
@@ -45,7 +55,7 @@ func TestPlanChangesSkipsDeletesWhenSourceUnhealthy(t *testing.T) {
 			managedByLabel: managedByValue,
 		},
 		Annotations: map[string]string{"netbox.object.ids": "1"},
-		Endpoints:   []endpointSpec{{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}},
+		Endpoint:    endpointSpec{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}},
 	}}
 	existing := map[string]*unstructured.Unstructured{
 		"netbox-example-com": toUnstructured(desired[0]),
@@ -134,7 +144,7 @@ func TestEquivalentResourceIgnoresUnrelatedMetadata(t *testing.T) {
 			"netbox.object.ids":   "1,2",
 			"netbox.domain.group": "example.com",
 		},
-		Endpoints: []endpointSpec{{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}},
+		Endpoint: endpointSpec{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}},
 	}
 	existing := toUnstructured(desired)
 	existing.SetCreationTimestamp(metav1.Now())
