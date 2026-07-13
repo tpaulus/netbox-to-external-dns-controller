@@ -15,70 +15,42 @@ const (
 )
 
 type Config struct {
-	NetBoxURL          string
-	NetBoxToken        string
-	NetBoxFilters      string
-	NetBoxPageSize     int
-	Namespace          string
-	ExternalDNSOwnerID string
-	Allowlist          []string
-	SyncInterval       time.Duration
-	DryRun             bool
-	MaxChanges         int
-	EnabledStatuses    map[string]struct{}
-	TTLField           string
-	MetricsAddress     string
-	KubeconfigPath     string
-	HTTPTimeout        time.Duration
-	RetryCount         int
-	DeleteOnPartial    bool
-}
-
-type rawConfig struct {
-	NetBoxURL          string        `env:"NETBOX_URL,required,notEmpty"`
-	NetBoxToken        string        `env:"NETBOX_TOKEN,required,notEmpty"`
-	NetBoxFilters      string        `env:"NETBOX_FILTERS"`
-	NetBoxPageSize     int           `env:"NETBOX_PAGE_SIZE" envDefault:"100"`
-	Namespace          string        `env:"TARGET_NAMESPACE" envDefault:"external-records"`
-	ExternalDNSOwnerID string        `env:"EXTERNAL_DNS_OWNER_ID" envDefault:"netbox-dns-sync"`
-	DomainAllowlist    string        `env:"DOMAIN_ALLOWLIST,required,notEmpty"`
-	EnabledStatuses    string        `env:"NETBOX_ENABLED_STATUSES" envDefault:"active"`
-	TTLField           string        `env:"NETBOX_TTL_FIELD" envDefault:"external_dns_ttl"`
-	MetricsAddress     string        `env:"METRICS_ADDRESS"`
-	KubeconfigPath     string        `env:"KUBECONFIG"`
-	HTTPTimeout        time.Duration `env:"HTTP_TIMEOUT" envDefault:"30s"`
-	RetryCount         int           `env:"RETRY_COUNT" envDefault:"3"`
-	DeleteOnPartial    bool          `env:"DELETE_ON_PARTIAL_FAILURE"`
-	DryRun             bool          `env:"DRY_RUN"`
-	MaxChanges         int           `env:"MAX_CHANGES_PER_RUN"`
-	SyncInterval       time.Duration `env:"SYNC_INTERVAL"`
+	NetBoxURL       string              `env:"NETBOX_URL,required,notEmpty"`
+	NetBoxToken     string              `env:"NETBOX_TOKEN,required,notEmpty"`
+	NetBoxFilters   string              `env:"NETBOX_FILTERS"`
+	NetBoxPageSize  int                 `env:"NETBOX_PAGE_SIZE" envDefault:"100"`
+	Namespace       string              `env:"TARGET_NAMESPACE" envDefault:"external-records"`
+	DomainAllowlist string              `env:"DOMAIN_ALLOWLIST,required,notEmpty"`
+	Allowlist       []string            `env:"-"`
+	SyncInterval    time.Duration       `env:"SYNC_INTERVAL"`
+	DryRun          bool                `env:"DRY_RUN"`
+	MaxChanges      int                 `env:"MAX_CHANGES_PER_RUN"`
+	NetBoxStatuses  string              `env:"NETBOX_ENABLED_STATUSES" envDefault:"active"`
+	EnabledStatuses map[string]struct{} `env:"-"`
+	TTLField        string              `env:"NETBOX_TTL_FIELD" envDefault:"external_dns_ttl"`
+	MetricsAddress  string              `env:"METRICS_ADDRESS"`
+	KubeconfigPath  string              `env:"KUBECONFIG"`
+	HTTPTimeout     time.Duration       `env:"HTTP_TIMEOUT" envDefault:"30s"`
+	RetryCount      int                 `env:"RETRY_COUNT" envDefault:"3"`
+	DeleteOnPartial bool                `env:"DELETE_ON_PARTIAL_FAILURE"`
 }
 
 func loadConfig() (Config, error) {
-	var raw rawConfig
-	if err := env.Parse(&raw); err != nil {
+	var cfg Config
+	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse environment: %w", err)
 	}
 
-	cfg := Config{
-		NetBoxURL:          strings.TrimRight(strings.TrimSpace(raw.NetBoxURL), "/"),
-		NetBoxToken:        strings.TrimSpace(raw.NetBoxToken),
-		NetBoxFilters:      strings.TrimPrefix(strings.TrimSpace(raw.NetBoxFilters), "?"),
-		NetBoxPageSize:     raw.NetBoxPageSize,
-		Namespace:          strings.TrimSpace(raw.Namespace),
-		ExternalDNSOwnerID: strings.TrimSpace(raw.ExternalDNSOwnerID),
-		Allowlist:          normalizeList(raw.DomainAllowlist),
-		SyncInterval:       raw.SyncInterval,
-		DryRun:             raw.DryRun,
-		MaxChanges:         raw.MaxChanges,
-		EnabledStatuses:    listToSet(normalizeList(raw.EnabledStatuses)),
-		TTLField:           strings.TrimSpace(raw.TTLField),
-		MetricsAddress:     strings.TrimSpace(raw.MetricsAddress),
-		KubeconfigPath:     strings.TrimSpace(raw.KubeconfigPath),
-		HTTPTimeout:        raw.HTTPTimeout,
-		RetryCount:         raw.RetryCount,
-		DeleteOnPartial:    raw.DeleteOnPartial,
-	}
+	cfg.NetBoxURL = strings.TrimRight(strings.TrimSpace(cfg.NetBoxURL), "/")
+	cfg.NetBoxToken = strings.TrimSpace(cfg.NetBoxToken)
+	cfg.NetBoxFilters = strings.TrimPrefix(strings.TrimSpace(cfg.NetBoxFilters), "?")
+	cfg.Namespace = strings.TrimSpace(cfg.Namespace)
+	cfg.Allowlist = normalizeList(cfg.DomainAllowlist)
+	cfg.NetBoxStatuses = strings.TrimSpace(cfg.NetBoxStatuses)
+	cfg.EnabledStatuses = listToSet(normalizeList(cfg.NetBoxStatuses))
+	cfg.TTLField = strings.TrimSpace(cfg.TTLField)
+	cfg.MetricsAddress = strings.TrimSpace(cfg.MetricsAddress)
+	cfg.KubeconfigPath = strings.TrimSpace(cfg.KubeconfigPath)
 
 	if cfg.NetBoxURL == "" {
 		return Config{}, errors.New("NETBOX_URL is required")
@@ -91,9 +63,6 @@ func loadConfig() (Config, error) {
 	}
 	if len(cfg.EnabledStatuses) == 0 {
 		return Config{}, errors.New("NETBOX_ENABLED_STATUSES must contain at least one status")
-	}
-	if cfg.ExternalDNSOwnerID == "" {
-		return Config{}, errors.New("EXTERNAL_DNS_OWNER_ID must not be empty")
 	}
 	if cfg.NetBoxPageSize <= 0 {
 		return Config{}, errors.New("NETBOX_PAGE_SIZE must be greater than zero")

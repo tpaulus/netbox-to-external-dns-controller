@@ -152,7 +152,7 @@ func (s *kubernetesEventSink) Patch(event *corev1.Event, data []byte) (*corev1.E
 }
 
 func (r *reconciler) reconcile(ctx context.Context, records []sourceRecord, sourceHealthy bool, recordErrors []error) (reconcileSummary, error) {
-	desired := buildDesiredResources(r.config.Namespace, r.config.ExternalDNSOwnerID, records)
+	desired := buildDesiredResources(r.config.Namespace, records)
 	existing, err := r.listManaged(ctx)
 	if err != nil {
 		return reconcileSummary{RecordErrors: len(recordErrors)}, err
@@ -183,7 +183,7 @@ func (r *reconciler) emitEvent(eventType, reason, message string) {
 	r.recorder.Event(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.config.Namespace, Namespace: r.config.Namespace}}, eventType, reason, message)
 }
 
-func buildDesiredResources(namespace, ownerID string, records []sourceRecord) []desiredResource {
+func buildDesiredResources(namespace string, records []sourceRecord) []desiredResource {
 	grouped := make(map[string]*deviceAccumulator)
 	for _, record := range records {
 		deviceKey := deviceKey(record)
@@ -232,7 +232,6 @@ func buildDesiredResources(namespace, ownerID string, records []sourceRecord) []
 			endpoint := device.Endpoints[endpointKey]
 			endpoints = append(endpoints, endpointSpec{
 				DNSName:    endpoint.DNSName,
-				Labels:     map[string]string{"owner": ownerID},
 				RecordTTL:  endpoint.TTL,
 				RecordType: endpoint.RecordType,
 				Targets:    sortedSet(endpoint.Targets),
@@ -247,9 +246,8 @@ func buildDesiredResources(namespace, ownerID string, records []sourceRecord) []
 			Name:      resourceNameForDevice(device.DeviceName, device.DeviceID),
 			Namespace: namespace,
 			Labels: map[string]string{
-				managedByLabel:             managedByValue,
-				"externaldns.k8s.io/owner": ownerID,
-				"netbox-dns-sync/device":   sanitizeName(device.DeviceName),
+				managedByLabel:           managedByValue,
+				"netbox-dns-sync/device": sanitizeName(device.DeviceName),
 			},
 			Annotations: map[string]string{
 				"netbox.device.id":     strconv.Itoa(device.DeviceID),
@@ -307,7 +305,7 @@ func sanitizeName(value string) string {
 
 func (r *reconciler) listManaged(ctx context.Context) (map[string]*unstructured.Unstructured, error) {
 	list, err := r.dynamicClient.Resource(dnsEndpointGVR).Namespace(r.config.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: managedByLabel + "=" + managedByValue + ",externaldns.k8s.io/owner=" + r.config.ExternalDNSOwnerID,
+		LabelSelector: managedByLabel + "=" + managedByValue,
 	})
 	if err != nil {
 		return nil, err

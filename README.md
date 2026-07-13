@@ -10,7 +10,7 @@ reconciles one `DNSEndpoint` per device into `TARGET_NAMESPACE`.
 
 > [!IMPORTANT]
 > `DNSEndpoint` is ExternalDNS's CRD source type. Configure ExternalDNS with
-> `--registry=crd`, and make sure `--txt-owner-id` matches `EXTERNAL_DNS_OWNER_ID`.
+> `--registry=crd`.
 > The `dnsendpoints.externaldns.k8s.io` CRD must also be installed in the cluster.
 
 ## Configuration
@@ -27,7 +27,6 @@ Optional environment variables:
 - `NETBOX_ENABLED_STATUSES` - comma-separated NetBox statuses to treat as enabled (`active` by default)
 - `NETBOX_TTL_FIELD` - custom field used for per-record TTL overrides (`external_dns_ttl` by default)
 - `TARGET_NAMESPACE` - namespace that contains managed `DNSEndpoint` objects (`external-records` by default)
-- `EXTERNAL_DNS_OWNER_ID` - owner label written to each `DNSEndpoint`; must match ExternalDNS `--txt-owner-id` (`netbox-dns-sync` by default)
 - `SYNC_INTERVAL` - if set, run continuously on this interval; otherwise the tool runs once for CronJob use
 - `DRY_RUN` - when `true`, log planned create/update/delete actions without writing to Kubernetes
 - `MAX_CHANGES_PER_RUN` - guardrail that aborts a sync when too many changes are planned
@@ -47,7 +46,6 @@ Optional environment variables:
 - Each `DNSEndpoint` includes one or more `spec.endpoints` entries, with repeated NetBox IPs for the same `dnsName` and record type merged into one `targets` list.
 - Managed resources are labeled with:
   - `app.kubernetes.io/managed-by=netbox-dns-sync`
-  - `externaldns.k8s.io/owner=<EXTERNAL_DNS_OWNER_ID>`
 - Deletes are skipped when the source fetch is incomplete or unhealthy unless
   `DELETE_ON_PARTIAL_FAILURE=true`.
 
@@ -60,7 +58,6 @@ export NETBOX_URL="https://netbox.example.com"
 export NETBOX_TOKEN="replace-me"
 export DOMAIN_ALLOWLIST="example.com,example.org"
 export TARGET_NAMESPACE="external-dns"
-export EXTERNAL_DNS_OWNER_ID="netbox-dns-sync"
 
 ./netbox-to-external-dns-controller
 ```
@@ -72,7 +69,6 @@ ExternalDNS must be configured for the CRD registry:
 ```yaml
 args:
   - --registry=crd
-  - --txt-owner-id=netbox-dns-sync
   - --namespace=external-dns
 ```
 
@@ -86,7 +82,6 @@ metadata:
   namespace: external-dns
   labels:
     app.kubernetes.io/managed-by: netbox-dns-sync
-    externaldns.k8s.io/owner: netbox-dns-sync
     netbox-dns-sync/device: device-a
   annotations:
     netbox.device.id: "10"
@@ -96,8 +91,6 @@ metadata:
 spec:
   endpoints:
     - dnsName: host.example.com
-      labels:
-        owner: netbox-dns-sync
       recordType: A
       recordTTL: 300
       targets:
@@ -111,8 +104,6 @@ spec:
         - name: netbox-tags
           value: edge,prod
     - dnsName: host-ipmi.example.com
-      labels:
-        owner: netbox-dns-sync
       recordType: A
       targets:
         - 192.0.2.20

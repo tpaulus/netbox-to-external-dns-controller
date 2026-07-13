@@ -10,7 +10,7 @@ import (
 
 func TestBuildDesiredResourcesDeterministic(t *testing.T) {
 	ttl := int64(300)
-	resources := buildDesiredResources("external-records", "netbox-dns-sync", []sourceRecord{
+	resources := buildDesiredResources("external-records", []sourceRecord{
 		{ObjectID: 2, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "2001:db8::1", Type: "AAAA", Group: "example.com"},
 		{ObjectID: 1, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.10", Type: "A", TTL: &ttl, Group: "example.com", Tags: []string{"prod", "edge"}},
 		{ObjectID: 3, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.11", Type: "A", TTL: &ttl, Group: "example.com", Tags: []string{"edge"}},
@@ -46,8 +46,8 @@ func TestBuildDesiredResourcesDeterministic(t *testing.T) {
 	if endpoint.DNSName == "" {
 		t.Fatalf("expected merged host A endpoint, got %+v", resources[0].Endpoints)
 	}
-	if endpoint.Labels["owner"] != "netbox-dns-sync" {
-		t.Fatalf("unexpected endpoint owner label: %+v", endpoint.Labels)
+	if len(endpoint.Labels) != 0 {
+		t.Fatalf("expected no endpoint labels, got %+v", endpoint.Labels)
 	}
 	if len(endpoint.Targets) != 2 || endpoint.Targets[0] != "192.0.2.10" || endpoint.Targets[1] != "192.0.2.11" {
 		t.Fatalf("targets were not deterministically merged: %+v", endpoint.Targets)
