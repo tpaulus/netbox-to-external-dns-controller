@@ -15,34 +15,36 @@ const (
 )
 
 type Config struct {
-	NetBoxURL       string
-	NetBoxToken     string
-	NetBoxFilters   string
-	NetBoxPageSize  int
-	Namespace       string
-	Allowlist       []string
-	SyncInterval    time.Duration
-	DryRun          bool
-	MaxChanges      int
-	EnabledStatuses map[string]struct{}
-	TTLField        string
-	MetricsAddress  string
-	KubeconfigPath  string
-	HTTPTimeout     time.Duration
-	RetryCount      int
-	DeleteOnPartial bool
+	NetBoxURL          string
+	NetBoxToken        string
+	NetBoxFilters      string
+	NetBoxPageSize     int
+	Namespace          string
+	ExternalDNSOwnerID string
+	Allowlist          []string
+	SyncInterval       time.Duration
+	DryRun             bool
+	MaxChanges         int
+	EnabledStatuses    map[string]struct{}
+	TTLField           string
+	MetricsAddress     string
+	KubeconfigPath     string
+	HTTPTimeout        time.Duration
+	RetryCount         int
+	DeleteOnPartial    bool
 }
 
 func loadConfig() (Config, error) {
 	cfg := Config{
-		NetBoxURL:      strings.TrimRight(os.Getenv("NETBOX_URL"), "/"),
-		NetBoxToken:    os.Getenv("NETBOX_TOKEN"),
-		NetBoxFilters:  strings.TrimPrefix(strings.TrimSpace(os.Getenv("NETBOX_FILTERS")), "?"),
-		NetBoxPageSize: envInt("NETBOX_PAGE_SIZE", 100),
-		Namespace:      envString("TARGET_NAMESPACE", "external-records"),
-		Allowlist:      normalizeList(os.Getenv("DOMAIN_ALLOWLIST")),
-		DryRun:         envBool("DRY_RUN", false),
-		MaxChanges:     envInt("MAX_CHANGES_PER_RUN", 0),
+		NetBoxURL:          strings.TrimRight(os.Getenv("NETBOX_URL"), "/"),
+		NetBoxToken:        os.Getenv("NETBOX_TOKEN"),
+		NetBoxFilters:      strings.TrimPrefix(strings.TrimSpace(os.Getenv("NETBOX_FILTERS")), "?"),
+		NetBoxPageSize:     envInt("NETBOX_PAGE_SIZE", 100),
+		Namespace:          envString("TARGET_NAMESPACE", "external-records"),
+		ExternalDNSOwnerID: envString("EXTERNAL_DNS_OWNER_ID", "netbox-dns-sync"),
+		Allowlist:          normalizeList(os.Getenv("DOMAIN_ALLOWLIST")),
+		DryRun:             envBool("DRY_RUN", false),
+		MaxChanges:         envInt("MAX_CHANGES_PER_RUN", 0),
 		EnabledStatuses: listToSet(defaultList(
 			normalizeList(os.Getenv("NETBOX_ENABLED_STATUSES")),
 			[]string{"active"},
@@ -72,6 +74,9 @@ func loadConfig() (Config, error) {
 	}
 	if len(cfg.Allowlist) == 0 {
 		return Config{}, errors.New("DOMAIN_ALLOWLIST must contain at least one suffix")
+	}
+	if cfg.ExternalDNSOwnerID == "" {
+		return Config{}, errors.New("EXTERNAL_DNS_OWNER_ID must not be empty")
 	}
 	if cfg.NetBoxPageSize <= 0 {
 		return Config{}, errors.New("NETBOX_PAGE_SIZE must be greater than zero")

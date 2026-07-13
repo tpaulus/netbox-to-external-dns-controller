@@ -50,8 +50,10 @@ type desiredResource struct {
 
 type endpointSpec struct {
 	DNSName          string             `json:"dnsName"`
+	Labels           map[string]string  `json:"labels,omitempty"`
 	RecordTTL        *int64             `json:"recordTTL,omitempty"`
 	RecordType       string             `json:"recordType"`
+	SetIdentifier    string             `json:"setIdentifier,omitempty"`
 	Targets          []string           `json:"targets"`
 	ProviderSpecific []providerSpecific `json:"providerSpecific,omitempty"`
 }
@@ -131,7 +133,7 @@ func (s *kubernetesEventSink) Patch(event *corev1.Event, data []byte) (*corev1.E
 }
 
 func (r *reconciler) reconcile(ctx context.Context, records []sourceRecord, sourceHealthy bool, recordErrors []error) (reconcileSummary, error) {
-	desired := buildDesiredResources(r.config.Namespace, records)
+	desired := buildDesiredResources(r.config.Namespace, r.config.ExternalDNSOwnerID, records)
 	existing, err := r.listManaged(ctx)
 	if err != nil {
 		return reconcileSummary{RecordErrors: len(recordErrors)}, err
@@ -162,7 +164,7 @@ func (r *reconciler) emitEvent(eventType, reason, message string) {
 	r.recorder.Event(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.config.Namespace, Namespace: r.config.Namespace}}, eventType, reason, message)
 }
 
-func buildDesiredResources(namespace string, records []sourceRecord) []desiredResource {
+func buildDesiredResources(namespace, ownerID string, records []sourceRecord) []desiredResource {
 	grouped := make(map[string]*endpointAccumulator)
 	for _, record := range records {
 		key := endpointKey(record)
@@ -194,8 +196,9 @@ func buildDesiredResources(namespace string, records []sourceRecord) []desiredRe
 			Name:      resourceNameForRecord(acc.DNSName, acc.RecordType),
 			Namespace: namespace,
 			Labels: map[string]string{
-				managedByLabel:          managedByValue,
-				"netbox-dns-sync/group": sanitizeName(acc.Group),
+				managedByLabel:             managedByValue,
+				"externaldns.k8s.io/owner": ownerID,
+				"netbox-dns-sync/group":    sanitizeName(acc.Group),
 			},
 			Annotations: map[string]string{
 				"netbox.object.ids":   intsToCSV(acc.IDs),
@@ -203,6 +206,7 @@ func buildDesiredResources(namespace string, records []sourceRecord) []desiredRe
 			},
 			Endpoint: endpointSpec{
 				DNSName:    acc.DNSName,
+				Labels:     map[string]string{"owner": ownerID},
 				RecordTTL:  acc.TTL,
 				RecordType: acc.RecordType,
 				Targets:    sortedSet(acc.Targets),
@@ -267,7 +271,7 @@ func sanitizeName(value string) string {
 
 func (r *reconciler) listManaged(ctx context.Context) (map[string]*unstructured.Unstructured, error) {
 	list, err := r.dynamicClient.Resource(dnsRecordGVR).Namespace(r.config.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: managedByLabel + "=" + managedByValue,
+		LabelSelector: managedByLabel + "=" + managedByValue + ",externaldns.k8s.io/owner=" + r.config.ExternalDNSOwnerID,
 	})
 	if err != nil {
 		return nil, err
@@ -429,8 +433,14 @@ func toUnstructured(resource desiredResource) *unstructured.Unstructured {
 		"recordType": resource.Endpoint.RecordType,
 		"targets":    targets,
 	}
+	if len(resource.Endpoint.Labels) > 0 {
+		endpoint["labels"] = resource.Endpoint.Labels
+	}
 	if resource.Endpoint.RecordTTL != nil {
 		endpoint["recordTTL"] = *resource.Endpoint.RecordTTL
+	}
+	if resource.Endpoint.SetIdentifier != "" {
+		endpoint["setIdentifier"] = resource.Endpoint.SetIdentifier
 	}
 	if len(resource.Endpoint.ProviderSpecific) > 0 {
 		providerSpecific := make([]any, 0, len(resource.Endpoint.ProviderSpecific))
