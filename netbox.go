@@ -33,7 +33,6 @@ type sourceRecord struct {
 	Target     string
 	Type       string
 	TTL        *int64
-	Tags       []string
 	Group      string
 }
 
@@ -212,7 +211,6 @@ func transformIPAddress(item netbox.IPAddress, cfg Config) (sourceRecord, error,
 		Target:     ip.String(),
 		Type:       recordType,
 		TTL:        ttl,
-		Tags:       extractTagNames(item.Tags),
 		Group:      group,
 	}, nil, true
 }
@@ -322,22 +320,6 @@ func parseTTL(customFields map[string]any, field string) (*int64, error) {
 		return nil, fmt.Errorf("ttl must be greater than zero, got %d", ttl)
 	}
 	return &ttl, nil
-}
-
-func extractTagNames(tags []netbox.NestedTag) []string {
-	if len(tags) == 0 {
-		return nil
-	}
-	values := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		switch {
-		case strings.TrimSpace(tag.Slug) != "":
-			values = append(values, strings.ToLower(strings.TrimSpace(tag.Slug)))
-		case strings.TrimSpace(tag.Name) != "":
-			values = append(values, strings.ToLower(strings.TrimSpace(tag.Name)))
-		}
-	}
-	return values
 }
 
 func normalizeDNSName(name string) string {

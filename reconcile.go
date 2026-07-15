@@ -93,7 +93,6 @@ type endpointAccumulator struct {
 	TTL        *int64
 	Targets    map[string]struct{}
 	IDs        map[int]struct{}
-	Tags       map[string]struct{}
 	Group      string
 }
 
@@ -210,16 +209,12 @@ func buildDesiredResources(namespace string, records []sourceRecord) []desiredRe
 				TTL:        record.TTL,
 				Targets:    map[string]struct{}{},
 				IDs:        map[int]struct{}{},
-				Tags:       map[string]struct{}{},
 				Group:      record.Group,
 			}
 			device.Endpoints[endpointKey] = endpoint
 		}
 		endpoint.Targets[record.Target] = struct{}{}
 		endpoint.IDs[record.ObjectID] = struct{}{}
-		for _, tag := range record.Tags {
-			endpoint.Tags[tag] = struct{}{}
-		}
 	}
 
 	resourceKeys := sortedKeys(grouped)
@@ -235,11 +230,6 @@ func buildDesiredResources(namespace string, records []sourceRecord) []desiredRe
 				RecordTTL:  endpoint.TTL,
 				RecordType: endpoint.RecordType,
 				Targets:    sortedSet(endpoint.Targets),
-				ProviderSpecific: []providerSpecific{
-					{Name: "netbox-group", Value: endpoint.Group},
-					{Name: "netbox-object-ids", Value: intsToCSV(endpoint.IDs)},
-					{Name: "netbox-tags", Value: strings.Join(sortedSet(endpoint.Tags), ",")},
-				},
 			})
 		}
 		resources = append(resources, desiredResource{

@@ -12,8 +12,8 @@ func TestBuildDesiredResourcesDeterministic(t *testing.T) {
 	ttl := int64(300)
 	resources := buildDesiredResources("external-records", []sourceRecord{
 		{ObjectID: 2, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "2001:db8::1", Type: "AAAA", Group: "example.com"},
-		{ObjectID: 1, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.10", Type: "A", TTL: &ttl, Group: "example.com", Tags: []string{"prod", "edge"}},
-		{ObjectID: 3, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.11", Type: "A", TTL: &ttl, Group: "example.com", Tags: []string{"edge"}},
+		{ObjectID: 1, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.10", Type: "A", TTL: &ttl, Group: "example.com"},
+		{ObjectID: 3, DeviceID: 10, DeviceName: "device-a", DNSName: "host.example.com", Target: "192.0.2.11", Type: "A", TTL: &ttl, Group: "example.com"},
 		{ObjectID: 4, DeviceID: 10, DeviceName: "device-a", DNSName: "host-ipmi.example.com", Target: "192.0.2.20", Type: "A", Group: "example.com"},
 		{ObjectID: 5, DeviceID: 20, DeviceName: "device-b", DNSName: "other.example.org", Target: "192.0.2.30", Type: "A", Group: "example.org"},
 	})
@@ -49,8 +49,26 @@ func TestBuildDesiredResourcesDeterministic(t *testing.T) {
 	if len(endpoint.Labels) != 0 {
 		t.Fatalf("expected no endpoint labels, got %+v", endpoint.Labels)
 	}
+	if len(endpoint.ProviderSpecific) != 0 {
+		t.Fatalf("expected no endpoint providerSpecific metadata, got %+v", endpoint.ProviderSpecific)
+	}
 	if len(endpoint.Targets) != 2 || endpoint.Targets[0] != "192.0.2.10" || endpoint.Targets[1] != "192.0.2.11" {
 		t.Fatalf("targets were not deterministically merged: %+v", endpoint.Targets)
+	}
+
+	obj := toUnstructured(resources[0])
+	endpoints, found, err := unstructured.NestedSlice(obj.Object, "spec", "endpoints")
+	if err != nil || !found {
+		t.Fatalf("expected rendered endpoints, found=%v err=%v", found, err)
+	}
+	for _, rawEndpoint := range endpoints {
+		rendered, ok := rawEndpoint.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected rendered endpoint type %T", rawEndpoint)
+		}
+		if _, found := rendered["providerSpecific"]; found {
+			t.Fatalf("expected rendered endpoint to omit providerSpecific, got %+v", rendered)
+		}
 	}
 }
 
@@ -178,6 +196,7 @@ func TestEquivalentResourceIgnoresUnrelatedMetadata(t *testing.T) {
 		},
 		Endpoints: []endpointSpec{{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}},
 	}
+
 	existing := toUnstructured(desired)
 	existing.SetCreationTimestamp(metav1.Now())
 	existing.SetLabels(map[string]string{
@@ -193,5 +212,49 @@ func TestEquivalentResourceIgnoresUnrelatedMetadata(t *testing.T) {
 	})
 	if !equivalentResource(desired, existing) {
 		t.Fatal("expected resources to be equivalent")
+	}
+}
+
+func TestPlanChangesRemovesLegacyNetboxProviderSpecificMetadata(t *testing.T) {
+	desired := desiredResource{
+		Name:      "netbox-device-a",
+		Namespace: "external-records",
+		Labels: map[string]string{
+			managedByLabel:           managedByValue,
+			"netbox-dns-sync/device": "device-a",
+		},
+		Annotations: map[string]string{
+			"netbox.device.id":   "10",
+			"netbox.device.name": "device-a",
+			"netbox.object.ids":  "1",
+		},
+		Endpoints: []endpointSpec{{DNSName: "a.example.com", RecordType: "A", Targets: []string{"192.0.2.1"}}},
+	}
+	existingResource := desired
+	existingResource.Endpoints = append([]endpointSpec(nil), desired.Endpoints...)
+	existingResource.Endpoints[0].ProviderSpecific = []providerSpecific{
+		{Name: "netbox-group", Value: "example.com"},
+		{Name: "netbox-object-ids", Value: "1"},
+		{Name: "netbox-tags", Value: "edge,prod"},
+	}
+	existing := map[string]*unstructured.Unstructured{
+		desired.Name: toUnstructured(existingResource),
+	}
+
+	plans, summary, err := planChanges([]desiredResource{desired}, existing, true, 0)
+	if err != nil {
+		t.Fatalf("planChanges returned error: %v", err)
+	}
+	if summary.Updated != 1 || len(plans) != 1 || plans[0].Operation != "update" {
+		t.Fatalf("expected one update to remove legacy metadata, summary=%+v plans=%+v", summary, plans)
+	}
+
+	endpoints, found, err := unstructured.NestedSlice(toUnstructured(plans[0].Resource).Object, "spec", "endpoints")
+	if err != nil || !found || len(endpoints) != 1 {
+		t.Fatalf("expected one rendered endpoint, found=%v err=%v endpoints=%+v", found, err, endpoints)
+	}
+	rendered := endpoints[0].(map[string]any)
+	if _, found := rendered["providerSpecific"]; found {
+		t.Fatalf("expected update to remove providerSpecific, got %+v", rendered)
 	}
 }

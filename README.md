@@ -96,18 +96,16 @@ spec:
       targets:
         - 192.0.2.10
         - 192.0.2.11
-      providerSpecific:
-        - name: netbox-group
-          value: example.com
-        - name: netbox-object-ids
-          value: "1,3"
-        - name: netbox-tags
-          value: edge,prod
     - dnsName: host-ipmi.example.com
       recordType: A
       targets:
         - 192.0.2.20
 ```
+
+NetBox provenance is kept on the `DNSEndpoint` object annotations instead of
+`spec.endpoints[].providerSpecific`. Provider-specific endpoint fields are
+reserved for DNS provider settings that ExternalDNS can round-trip with the DNS
+provider.
 
 ## Development
 
